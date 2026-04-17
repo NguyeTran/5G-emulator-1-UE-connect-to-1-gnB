@@ -1,6 +1,7 @@
 package gnbcontext
 
 import (
+	"fmt"
 	"emulator/internal/sctp"
 	"github.com/lvdund/ngap"
 	"github.com/lvdund/ngap/aper"
@@ -103,6 +104,30 @@ func (gnb *GnbContext) SendUplinkNasTransport(ranUeNgapId int64, amfUeNgapId int
 	}
 
 	data, err := ngap.NgapEncode(uplinkNas)
+	if err != nil { return err }
+	_, err = gnb.SctpClient.GetConn().Write(data)
+	return err
+}
+
+func (gnb *GnbContext) SendInitialContextSetupResponse(ranUeNgapId int64, amfUeNgapId int64) error {
+	fmt.Printf("📡 [gNB] Gửi Initial Context Setup Response chốt sổ với AMF...\n")
+	resp := &ies.InitialContextSetupResponse{
+		AMFUENGAPID: amfUeNgapId,
+		RANUENGAPID: ranUeNgapId,
+	}
+	data, err := ngap.NgapEncode(resp)
+	if err != nil { return err }
+	_, err = gnb.SctpClient.GetConn().Write(data)
+	return err
+}
+
+func (gnb *GnbContext) SendPduSessionResourceSetupResponse(ranUeNgapId int64, amfUeNgapId int64) error {
+	fmt.Printf("📡 [gNB] Gửi PDU Session Resource Setup Response cho AMF...\n")
+	resp := &ies.PDUSessionResourceSetupResponse{
+		AMFUENGAPID: amfUeNgapId,
+		RANUENGAPID: ranUeNgapId,
+	}
+	data, err := ngap.NgapEncode(resp)
 	if err != nil { return err }
 	_, err = gnb.SctpClient.GetConn().Write(data)
 	return err

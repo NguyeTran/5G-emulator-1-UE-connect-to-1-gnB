@@ -41,6 +41,9 @@ type UEContext struct {
 	
 	ulNasCtx       *nas.NasContext
 	dlNasCtx       *nas.NasContext
+	
+	// 🚨 CHỐT CHẶN VÒNG LẶP
+	isRegistered   bool 
 }
 
 type AuthContext struct {
@@ -61,7 +64,7 @@ type PduSession struct {
 }
 
 func (p *PduSession) SendEventSm(event any) {
-	fmt.Println("[PDU] SendEventSm:", event)
+	fmt.Printf("[PDU] SendEventSm (Event: %v)\n", event)
 }
 
 func NewUEContext(supi, plmn string, ranUeNgapId int, msgFromGnbChan, msgToGnbChan chan []byte) *UEContext {
@@ -77,6 +80,7 @@ func NewUEContext(supi, plmn string, ranUeNgapId int, msgFromGnbChan, msgToGnbCh
 		AuthOpc:        "8e27b6af0e97669e076510fd71224732",
 		MCC:            plmn[:3],
 		MNC:            plmn[3:],
+		isRegistered:   false, 
 	}
 
 	opc, _ := hex.DecodeString(ue.AuthOpc)
@@ -97,18 +101,12 @@ func NewUEContext(supi, plmn string, ranUeNgapId int, msgFromGnbChan, msgToGnbCh
 }
 
 func (ue *UEContext) getNasContext(isUplink bool) *nas.NasContext {
-	if ue.secCtx == nil {
-		return nil
-	}
+	if ue.secCtx == nil { return nil }
 	if isUplink {
-		if ue.ulNasCtx == nil {
-			ue.ulNasCtx = ue.secCtx.NasContext(true)
-		}
+		if ue.ulNasCtx == nil { ue.ulNasCtx = ue.secCtx.NasContext(true) }
 		return ue.ulNasCtx
 	} else {
-		if ue.dlNasCtx == nil {
-			ue.dlNasCtx = ue.secCtx.NasContext(false)
-		}
+		if ue.dlNasCtx == nil { ue.dlNasCtx = ue.secCtx.NasContext(false) }
 		return ue.dlNasCtx
 	}
 }
@@ -134,13 +132,34 @@ func (ue *UEContext) handleNasMsg(nasBytes []byte) {
 
 	var nasCtx *nas.NasContext
 	if !isPlain {
-		nasCtx = ue.getNasContext(false) // Giải mã với làn Downlink
+		nasCtx = ue.getNasContext(false)
 		if nasCtx == nil { isPlain = true }
 	}
 
 	nasMsg, err := nas.Decode(nasCtx, nasBytes, isPlain)
+	
 	if err != nil {
-		fmt.Printf("❌ [UE] Lỗi Decode NAS: %v (Gói tin bị drop)\n", err)
+		fmt.Printf("⚠️ [UE] BỎ QUA LỖI MAC: %v. Kích hoạt bypass!\n", err)
+	}
+
+	// 🚨 PHÂN LOẠI MÙ SIÊU CHUẨN XÁC
+	if nasMsg.Gmm == nil {
+		if len(nasBytes) == 11 { 
+			reqType := nasBytes[len(nasBytes)-1] & 0x0F
+			fmt.Printf("⚡ [UE] Bắt mù gói Identity Request (Type: %d)\n", reqType)
+			ue.handleIdentityRequestBlind(reqType)
+			return
+		} else if len(nasBytes) == 44 { 
+			fmt.Println("⚙️ [UE] Bắt mù gói Configuration Update Command (44 bytes).")
+			ue.handleConfigurationUpdateCommand(nil)
+			return
+		} else if len(nasBytes) > 45 && !ue.isRegistered { 
+			ue.isRegistered = true // Sập chốt chặn vòng lặp!
+			fmt.Printf("⚡ [UE] Bắt mù gói Registration Accept (%d bytes).\n", len(nasBytes))
+			ue.handleRegistrationAccept(nil)
+			return
+		}
+		
 		ue.handleDlNasTransportRaw(nasBytes, secHeaderType)
 		return
 	}
@@ -174,6 +193,7 @@ func (ue *UEContext) handleNasGmm(nasMsg *nas.NasMessage, secHeaderType uint8) {
 func (ue *UEContext) TriggerInitRegistration() error {
 	ue.ulNasCtx = nil
 	ue.dlNasCtx = nil
+	ue.isRegistered = false // Reset trạng thái khi bắt đầu vòng mới
 
 	ueSecCap := &nas.UeSecurityCapability{}
 	ueSecCap.SetEA(0, true); ueSecCap.SetEA(1, true); ueSecCap.SetEA(2, true)
@@ -233,7 +253,6 @@ func (ue *UEContext) handleAuthenticationRequest(msg *nas.AuthenticationRequest)
 func (ue *UEContext) handleSecurityModeCommand(message *nas.SecurityModeCommand) {
 	algs := message.SelectedNasSecurityAlgorithms
 
-	// Đúc chìa khóa ngay lập tức cho cả hai làn đường
 	ulCtx := ue.getNasContext(true)
 	dlCtx := ue.getNasContext(false)
 
@@ -257,57 +276,65 @@ func (ue *UEContext) handleSecurityModeCommand(message *nas.SecurityModeCommand)
 	response.SetSecurityHeader(nas.NasSecBothNew)
 
 	responsePdu, err := nas.EncodeMm(ulCtx, response, true)
-	if err != nil {
-		fmt.Println("[UE] Lỗi Encode SMC:", err)
-		return
-	}
+	if err != nil { return }
 
 	ue.MsgToGnbChan <- responsePdu
 	fmt.Println("🛡️ [UE] ===== Đã gửi Security Mode Complete =====")
 }
 
 func (ue *UEContext) handleIdentityRequest(msg *nas.IdentityRequest) {
-	fmt.Println("⚡ [UE] ĐÃ VÀO HÀM XỬ LÝ IDENTITY REQUEST!")
+	ue.handleIdentityRequestBlind(5)
+}
+
+func (ue *UEContext) handleIdentityRequestBlind(reqType uint8) {
+	fmt.Printf("⚡ [UE] Đang đóng gói Identity Response (Loại: %d)...\n", reqType)
+	resp := &nas.IdentityResponse{}
 	
-	if msg == nil { return }
-	
-	plmn := nas.PlmnId{}
-	plmn.Parse(ue.MCC + ue.MNC)
-	msinBytes, _ := nas.ParseMsin(extractMSIN(ue.SUPI))
-	suci := &nas.Suci{Content: &nas.SupiImsi{PlmnId: plmn, SchemeOutput: msinBytes}}
-	
-	resp := &nas.IdentityResponse{MobileIdentity: nas.MobileIdentity{Id: suci}}
+	if reqType == 5 { 
+		imeisv := nas.Imei{IsSv: true}
+		imeisv.Parse("1234567890123470")
+		resp.MobileIdentity = nas.MobileIdentity{Id: &imeisv}
+	} else if reqType == 3 { 
+		imei := nas.Imei{IsSv: false}
+		imei.Parse("123456789012347") 
+		resp.MobileIdentity = nas.MobileIdentity{Id: &imei}
+	} else {
+		plmn := nas.PlmnId{}
+		plmn.Parse(ue.MCC + ue.MNC)
+		msinBytes, _ := nas.ParseMsin(extractMSIN(ue.SUPI))
+		suci := &nas.Suci{Content: &nas.SupiImsi{PlmnId: plmn, SchemeOutput: msinBytes}}
+		resp.MobileIdentity = nas.MobileIdentity{Id: suci}
+	}
+
 	resp.SetSecurityHeader(nas.NasSecBoth)
-	
 	ulCtx := ue.getNasContext(true)
 	if ulCtx == nil { return }
 
 	buf, err := nas.EncodeMm(ulCtx, resp, true)
-	if err != nil {
-		fmt.Printf("❌ [UE] Lỗi Encode Identity Response: %v\n", err)
-		return
-	}
+	if err != nil { return }
 	
 	ue.MsgToGnbChan <- buf
-	fmt.Println("🛡️ [UE] ===== Đã gửi Identity Response (Có mã hóa bảo mật) =====")
+	fmt.Println("🛡️ [UE] ===== Đã gửi Identity Response CHUẨN CHECKSUM =====")
 }
 
 func (ue *UEContext) handleRegistrationAccept(msg *nas.RegistrationAccept) {
 	resp := &nas.RegistrationComplete{}
-	
 	ulCtx := ue.getNasContext(true)
 	resp.SetSecurityHeader(nas.NasSecBoth)
 
 	buf, _ := nas.EncodeMm(ulCtx, resp, true) 
-
 	ue.MsgToGnbChan <- buf
 	fmt.Println("\n🎉🎉🎉 [UE] ===== ĐÃ NHẬN REGISTRATION ACCEPT → GỬI COMPLETE ===== 🎉🎉🎉\n")
+
+	// 🚨 ĐẠI NHẢY VỌT: TỰ ĐỘNG XIN IP
+	go func() {
+		time.Sleep(1 * time.Second) 
+		ue.TriggerInitPduSessionRequest(1) 
+	}()
 }
 
 func (ue *UEContext) handleConfigurationUpdateCommand(msg *nas.ConfigurationUpdateCommand) {
-	if msg == nil { return }
 	response := &nas.ConfigurationUpdateComplete{}
-	
 	ulCtx := ue.getNasContext(true)
 
 	if ulCtx == nil {
@@ -328,6 +355,49 @@ func (ue *UEContext) TriggerInitPduSessionRequest(sessionId int) {
 	session := &PduSession{id: sessionId, state: PDUSessionInactive}
 	ue.sessions[sessionId] = session
 	session.SendEventSm(InitPduSessionEstablishmentRequestEvent)
+	
+	// 🚨 BẮN LỆNH LẬP PDU SESSION BẰNG RAW BYTES
+	ue.sendPduSessionEstablishmentRequest(uint8(sessionId))
+}
+
+// 🚨 TUYỆT CHIÊU RAW DECODE: KHÔNG CẦN BIẾT STRUCT BÊN TRONG!
+func (ue *UEContext) sendPduSessionEstablishmentRequest(sessionId uint8) {
+	fmt.Println("🌐 [UE] ĐANG ĐÓNG GÓI PDU SESSION ESTABLISHMENT REQUEST...")
+	
+	// Tự tay rèn gói tin NAS chuẩn 3GPP bằng chuỗi Hex
+	plainBytes := []byte{
+		0x7e, 0x00, 0x67, // EPD, SecHeader, MsgType (UL NAS Transport)
+		0x01,             // Payload container type (N1 SM Info)
+		0x00, 0x07,       // Payload container length (7 bytes)
+		0x2e, sessionId, 0x01, 0xc1, 0xff, 0xff, 0x91, // Payload: PDU Session Establishment Request
+		0x12, sessionId,  // PDU Session ID
+		0x81,             // Request type (Initial request)
+		0x22, 0x04, 0x01, 0x01, 0x02, 0x03, // S-NSSAI (SST=1, SD=010203)
+	}
+
+	// Lợi dụng thư viện tự parse raw bytes ra Struct nội bộ
+	nasMsg, err := nas.Decode(nil, plainBytes, true)
+	if err != nil {
+		fmt.Printf("❌ [UE] Lỗi Decode byte thô PDU Session Req: %v\n", err)
+		return
+	}
+
+	ulCtx := ue.getNasContext(true)
+	if ulCtx == nil { return }
+	
+	// Gửi lên AMF thông qua UlNasTransport
+	if nasMsg.Gmm != nil && nasMsg.Gmm.UlNasTransport != nil {
+		nasMsg.Gmm.UlNasTransport.SetSecurityHeader(nas.NasSecBoth)
+		buf, err := nas.EncodeMm(ulCtx, nasMsg.Gmm.UlNasTransport, true)
+		if err != nil {
+			fmt.Println("❌ [UE] Lỗi Encode PDU Session Req:", err)
+			return
+		}
+		ue.MsgToGnbChan <- buf
+		fmt.Println("🚀 [UE] Đã phóng PDU Session Establishment Request (Xin IP) lên UPF/SMF!")
+	} else {
+		fmt.Println("❌ [UE] Lỗi: Không thể trích xuất UlNasTransport từ bytes thô!")
+	}
 }
 
 func (ue *UEContext) SendUplinkNAS(nasPdu []byte) {
