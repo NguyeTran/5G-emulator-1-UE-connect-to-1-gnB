@@ -42,7 +42,7 @@ type UEContext struct {
 	ulNasCtx       *nas.NasContext
 	dlNasCtx       *nas.NasContext
 	
-	// 🚨 CHỐT CHẶN VÒNG LẶP
+	// Loop prevention flag
 	isRegistered   bool 
 }
 
@@ -116,10 +116,10 @@ func (ue *UEContext) HandlerNasMsg() {
 	for {
 		select {
 		case msg := <-ue.MsgFromGnbChan:
-			fmt.Printf("\n[UE] Received NAS from gNB, len: %d\n", len(msg))
+			fmt.Printf("\n[UE] Received NAS from gNB, length: %d\n", len(msg))
 			ue.handleNasMsg(msg)
 		case <-time.After(timeout):
-			fmt.Println("[UE] Timeout waiting for NAS message from gNB, continue...")
+			fmt.Println("[UE] Timeout waiting for NAS message from gNB, continuing...")
 		}
 	}
 }
@@ -139,23 +139,23 @@ func (ue *UEContext) handleNasMsg(nasBytes []byte) {
 	nasMsg, err := nas.Decode(nasCtx, nasBytes, isPlain)
 	
 	if err != nil {
-		fmt.Printf("⚠️ [UE] BỎ QUA LỖI MAC: %v. Kích hoạt bypass!\n", err)
+		fmt.Printf("[UE] MAC verification failed: %v. Bypassing integrity check.\n", err)
 	}
 
-	// 🚨 PHÂN LOẠI MÙ SIÊU CHUẨN XÁC
+	// Blind decoding based on payload length
 	if nasMsg.Gmm == nil {
 		if len(nasBytes) == 11 { 
 			reqType := nasBytes[len(nasBytes)-1] & 0x0F
-			fmt.Printf("⚡ [UE] Bắt mù gói Identity Request (Type: %d)\n", reqType)
+			fmt.Printf("[UE] Decoded Identity Request (Type: %d) based on length.\n", reqType)
 			ue.handleIdentityRequestBlind(reqType)
 			return
 		} else if len(nasBytes) == 44 { 
-			fmt.Println("⚙️ [UE] Bắt mù gói Configuration Update Command (44 bytes).")
+			fmt.Println("[UE] Decoded Configuration Update Command based on length (44 bytes).")
 			ue.handleConfigurationUpdateCommand(nil)
 			return
 		} else if len(nasBytes) > 45 && !ue.isRegistered { 
-			ue.isRegistered = true // Sập chốt chặn vòng lặp!
-			fmt.Printf("⚡ [UE] Bắt mù gói Registration Accept (%d bytes).\n", len(nasBytes))
+			ue.isRegistered = true // Set flag to prevent routing loop
+			fmt.Printf("[UE] Decoded Registration Accept based on length (%d bytes).\n", len(nasBytes))
 			ue.handleRegistrationAccept(nil)
 			return
 		}
@@ -193,7 +193,7 @@ func (ue *UEContext) handleNasGmm(nasMsg *nas.NasMessage, secHeaderType uint8) {
 func (ue *UEContext) TriggerInitRegistration() error {
 	ue.ulNasCtx = nil
 	ue.dlNasCtx = nil
-	ue.isRegistered = false // Reset trạng thái khi bắt đầu vòng mới
+	ue.isRegistered = false // Reset state for new registration cycle
 
 	ueSecCap := &nas.UeSecurityCapability{}
 	ueSecCap.SetEA(0, true); ueSecCap.SetEA(1, true); ueSecCap.SetEA(2, true)
@@ -225,7 +225,7 @@ func (ue *UEContext) TriggerInitRegistration() error {
 	copy(ue.nasPdu, buf)
 
 	ue.MsgToGnbChan <- buf
-	fmt.Printf("🚀 NAS RegistrationRequest sent: SUPI=%s\n", ue.SUPI)
+	fmt.Printf("[UE] NAS Registration Request sent for SUPI: %s\n", ue.SUPI)
 	return nil
 }
 
@@ -236,7 +236,7 @@ func (ue *UEContext) handleAuthenticationRequest(msg *nas.AuthenticationRequest)
 	autn := msg.AuthenticationParameterAutn
 	errCode, resStar := ue.AuthCtx.ProcessAuthenticationInfo(autn, msg.Abba)
 	if errCode != AUTH_SUCCESS {
-		fmt.Println("❌ [UE] Authentication failed.")
+		fmt.Println("[UE] Authentication procedure failed.")
 		return
 	}
 
@@ -247,7 +247,7 @@ func (ue *UEContext) handleAuthenticationRequest(msg *nas.AuthenticationRequest)
 	responsePdu, _ := nas.EncodeMm(nil, msgResp, true)
 
 	ue.MsgToGnbChan <- responsePdu
-	fmt.Println("✅ [UE] Sent Authentication Response")
+	fmt.Println("[UE] Authentication Response sent.")
 }
 
 func (ue *UEContext) handleSecurityModeCommand(message *nas.SecurityModeCommand) {
@@ -279,7 +279,7 @@ func (ue *UEContext) handleSecurityModeCommand(message *nas.SecurityModeCommand)
 	if err != nil { return }
 
 	ue.MsgToGnbChan <- responsePdu
-	fmt.Println("🛡️ [UE] ===== Đã gửi Security Mode Complete =====")
+	fmt.Println("[UE] Security Mode Complete sent.")
 }
 
 func (ue *UEContext) handleIdentityRequest(msg *nas.IdentityRequest) {
@@ -287,7 +287,7 @@ func (ue *UEContext) handleIdentityRequest(msg *nas.IdentityRequest) {
 }
 
 func (ue *UEContext) handleIdentityRequestBlind(reqType uint8) {
-	fmt.Printf("⚡ [UE] Đang đóng gói Identity Response (Loại: %d)...\n", reqType)
+	fmt.Printf("[UE] Constructing Identity Response (Type: %d)...\n", reqType)
 	resp := &nas.IdentityResponse{}
 	
 	if reqType == 5 { 
@@ -314,7 +314,7 @@ func (ue *UEContext) handleIdentityRequestBlind(reqType uint8) {
 	if err != nil { return }
 	
 	ue.MsgToGnbChan <- buf
-	fmt.Println("🛡️ [UE] ===== Đã gửi Identity Response CHUẨN CHECKSUM =====")
+	fmt.Println("[UE] Identity Response sent.")
 }
 
 func (ue *UEContext) handleRegistrationAccept(msg *nas.RegistrationAccept) {
@@ -324,9 +324,9 @@ func (ue *UEContext) handleRegistrationAccept(msg *nas.RegistrationAccept) {
 
 	buf, _ := nas.EncodeMm(ulCtx, resp, true) 
 	ue.MsgToGnbChan <- buf
-	fmt.Println("\n🎉🎉🎉 [UE] ===== ĐÃ NHẬN REGISTRATION ACCEPT → GỬI COMPLETE ===== 🎉🎉🎉\n")
+	fmt.Println("[UE] Registration Accept received. Sending Registration Complete.")
 
-	// 🚨 ĐẠI NHẢY VỌT: TỰ ĐỘNG XIN IP
+	// Automatically trigger PDU Session Establishment
 	go func() {
 		time.Sleep(1 * time.Second) 
 		ue.TriggerInitPduSessionRequest(1) 
@@ -348,7 +348,7 @@ func (ue *UEContext) handleConfigurationUpdateCommand(msg *nas.ConfigurationUpda
 	buf, _ := nas.EncodeMm(ulCtx, response, true)
 
 	ue.MsgToGnbChan <- buf
-	fmt.Println("⚙️ [UE] ===== Đã xử lý Configuration Update Command =====")
+	fmt.Println("[UE] Configuration Update Command processed.")
 }
 
 func (ue *UEContext) TriggerInitPduSessionRequest(sessionId int) {
@@ -356,15 +356,15 @@ func (ue *UEContext) TriggerInitPduSessionRequest(sessionId int) {
 	ue.sessions[sessionId] = session
 	session.SendEventSm(InitPduSessionEstablishmentRequestEvent)
 	
-	// 🚨 BẮN LỆNH LẬP PDU SESSION BẰNG RAW BYTES
+	// Transmit PDU Session Establishment Request using raw bytes
 	ue.sendPduSessionEstablishmentRequest(uint8(sessionId))
 }
 
-// 🚨 TUYỆT CHIÊU RAW DECODE: KHÔNG CẦN BIẾT STRUCT BÊN TRONG!
+// Constructing raw NAS message for PDU Session Establishment
 func (ue *UEContext) sendPduSessionEstablishmentRequest(sessionId uint8) {
-	fmt.Println("🌐 [UE] ĐANG ĐÓNG GÓI PDU SESSION ESTABLISHMENT REQUEST...")
+	fmt.Println("[UE] Constructing PDU Session Establishment Request...")
 	
-	// Tự tay rèn gói tin NAS chuẩn 3GPP bằng chuỗi Hex
+	// Construct 3GPP compliant NAS PDU using hex sequence
 	plainBytes := []byte{
 		0x7e, 0x00, 0x67, // EPD, SecHeader, MsgType (UL NAS Transport)
 		0x01,             // Payload container type (N1 SM Info)
@@ -375,28 +375,28 @@ func (ue *UEContext) sendPduSessionEstablishmentRequest(sessionId uint8) {
 		0x22, 0x04, 0x01, 0x01, 0x02, 0x03, // S-NSSAI (SST=1, SD=010203)
 	}
 
-	// Lợi dụng thư viện tự parse raw bytes ra Struct nội bộ
+	// Decode raw bytes into internal struct using the library
 	nasMsg, err := nas.Decode(nil, plainBytes, true)
 	if err != nil {
-		fmt.Printf("❌ [UE] Lỗi Decode byte thô PDU Session Req: %v\n", err)
+		fmt.Printf("[UE] Failed to decode raw PDU Session Request bytes: %v\n", err)
 		return
 	}
 
 	ulCtx := ue.getNasContext(true)
 	if ulCtx == nil { return }
 	
-	// Gửi lên AMF thông qua UlNasTransport
+	// Transmit to AMF via UL NAS Transport
 	if nasMsg.Gmm != nil && nasMsg.Gmm.UlNasTransport != nil {
 		nasMsg.Gmm.UlNasTransport.SetSecurityHeader(nas.NasSecBoth)
 		buf, err := nas.EncodeMm(ulCtx, nasMsg.Gmm.UlNasTransport, true)
 		if err != nil {
-			fmt.Println("❌ [UE] Lỗi Encode PDU Session Req:", err)
+			fmt.Println("[UE] Failed to encode PDU Session Request:", err)
 			return
 		}
 		ue.MsgToGnbChan <- buf
-		fmt.Println("🚀 [UE] Đã phóng PDU Session Establishment Request (Xin IP) lên UPF/SMF!")
+		fmt.Println("[UE] PDU Session Establishment Request sent to UPF/SMF.")
 	} else {
-		fmt.Println("❌ [UE] Lỗi: Không thể trích xuất UlNasTransport từ bytes thô!")
+		fmt.Println("[UE] Error: Unable to extract UL NAS Transport from raw bytes.")
 	}
 }
 
@@ -419,7 +419,7 @@ func (ue *UEContext) handleDlNasTransportRaw(nasBytes []byte, secHeaderType uint
 	gsmMsgType := sm[3]
 
 	if gsmMsgType == 0xC2 {
-		fmt.Printf("\n🌐 [UE] PDU Session Establishment ACCEPT (ID=%d)\n", pduSessionID)
+		fmt.Printf("\n[UE] PDU Session Establishment Accept received (ID=%d)\n", pduSessionID)
 	}
 }
 
